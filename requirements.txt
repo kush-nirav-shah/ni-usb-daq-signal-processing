@@ -1,0 +1,7 @@
+nidaqmx
+PyQt5
+pyqtgraph
+numpy
+scipy
+collections
+time
