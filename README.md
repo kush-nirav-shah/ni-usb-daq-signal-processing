@@ -68,7 +68,7 @@ This guide focuses on running the NI USB-6363 DAQ project, as that’s the main 
 - Open your terminal (Command Prompt on Windows, Terminal on Mac/Linux) and navigate to the folder where requirements.txt is saved.
 
 - Run this command:
-
+  ```bash
 - pip install -r requirements.txt
 
 -
