@@ -53,12 +53,12 @@ This guide focuses on running the NI USB-6363 DAQ project, as that’s the main 
 
 #### Install Python:
 
-- Download and install Python from python.org.
-- During installation, check “Add Python to PATH.”
+- Download and install Python from [python.org](https://www.python.org/)
+- During installation, **check** “Add Python to PATH.”
 
 #### Install NI-DAQmx Driver:
 
-- Download the NI-DAQmx driver from the National Instruments website.
+- Download the NI-DAQmx driver from the [National Instruments](https://www.ni.com/en-us/support/downloads/drivers/download.ni-daqmx.html)
 - Follow the installation instructions.
 
 #### Install Python Libraries:
