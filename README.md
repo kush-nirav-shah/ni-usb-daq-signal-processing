@@ -82,22 +82,18 @@ This installs the Python libraries needed to control the DAQ.
 ### Step 3: Run the DAQ Code
 
 - Open a terminal or a Python editor (like VS Code, PyCharm, or IDLE).
-
 - Navigate to the ni_usb_python_code/ folder in the terminal. For example:
-
 - cd path/to/ni_usb_python_code
-
 - Run a Python file by typing:
 - python final_analog_read_multichannel.py
 
-- 
 (Replace final_analog_read_multichannel.py with the file you want to run, like digital_write.py or final_digital_read_multichannel.py.)
 
 - The program will start reading or sending signals, depending on the code.
 
 ### Step 4: Test It!
 
-- If you’re reading signals (e.g., with final_analog_read_multichannel.py), you should see data (like voltage values) printed on your screen.
+- If you’re reading signals (e.g., with final_analog_read_multichannel.py), you should see sine/square waves printed on your screen.
 - If you’re sending signals (e.g., with digital_write.py), check if the connected device responds as expected.
 - Ensure your sensors or devices are properly connected to the DAQ’s ports.
 
