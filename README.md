@@ -69,8 +69,8 @@ This guide focuses on running the NI USB-6363 DAQ project, as that’s the main 
 
 - Run this command:
   ```bash
-- pip install -r requirements.txt
-```bash
+pip install -r requirements.txt
+  
 This installs the Python libraries needed to control the DAQ.
 
 ### Step 2: Connect the Hardware
