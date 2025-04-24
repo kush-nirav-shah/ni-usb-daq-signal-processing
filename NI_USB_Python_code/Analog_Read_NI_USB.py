@@ -1,11 +1,11 @@
 import sys
 import nidaqmx
-from nidaqmx.constants import AcquisitionType, TerminalConfiguration, Edge
+from nidaqmx.constants import AcquisitionType, TerminalConfiguration
 from nidaqmx.stream_readers import AnalogMultiChannelReader
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QPushButton, QCheckBox, QDoubleSpinBox, QComboBox,
-                             QMessageBox, QGroupBox, QGridLayout)
+                             QLabel, QPushButton, QCheckBox, QComboBox,
+                             QMessageBox, QGroupBox, QGridLayout, QDoubleSpinBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex
 from PyQt5.QtGui import QIcon
 import pyqtgraph as pg
@@ -14,7 +14,7 @@ from collections import deque
 import time
 
 class AcquisitionThread(QThread):
-    data_ready = pyqtSignal(np.ndarray, np.ndarray, list, list)
+    data_ready = pyqtSignal(np.ndarray, np.ndarray, list, list, list, list, list, list)
     error_occurred = pyqtSignal(str)
     sampling_rate_updated = pyqtSignal(float)
 
@@ -26,10 +26,6 @@ class AcquisitionThread(QThread):
         self.running = False
         self.task = None
         self.reader = None
-        self.trigger_level = 0.0
-        self.trigger_channel = 0
-        self.trigger_enabled = True
-        self.trigger_edge = Edge.RISING
         self.selected_channels = set(range(num_channels))
         self.v_per_div = [1.0] * num_channels
         self.min_sampling_rate = 1000
@@ -37,33 +33,14 @@ class AcquisitionThread(QThread):
         self.max_per_channel_rate = self.max_aggregate_rate // max(1, len(self.selected_channels))
         self.mutex = QMutex()
         self.data_buffer = deque(maxlen=5)
-        self.trigger_timeout = 1.0
-        self.trigger_position = 0.5
         self.restart_needed = False
         self.new_sampling_rate = None
-
-    def update_trigger(self, level, channel, enabled=True, edge=Edge.RISING):
-        self.mutex.lock()
-        try:
-            self.trigger_level = level
-            self.trigger_channel = channel
-            self.trigger_enabled = enabled
-            self.trigger_edge = edge
-        finally:
-            self.mutex.unlock()
-
-    def update_trigger_position(self, position):
-        self.mutex.lock()
-        try:
-            self.trigger_position = max(0.1, min(0.9, position))
-        finally:
-            self.mutex.unlock()
 
     def update_v_per_div(self, channel, value):
         self.mutex.lock()
         try:
             if 0 <= channel < self.num_channels:
-                self.v_per_div[channel] = max(0.01, value)
+                self.v_per_div[channel] = max(0.001, value)
         finally:
             self.mutex.unlock()
 
@@ -153,13 +130,6 @@ class AcquisitionThread(QThread):
         except:
             return 0.0
 
-    def find_trigger_point(self, data):
-        if self.trigger_edge == Edge.RISING:
-            crossings = np.where(np.diff(np.sign(data - self.trigger_level)) > 0)[0]
-        else:
-            crossings = np.where(np.diff(np.sign(data - self.trigger_level)) < 0)[0]
-        return crossings[0] if crossings.size > 0 else None
-
     def run(self):
         try:
             self.create_task()
@@ -194,26 +164,18 @@ class AcquisitionThread(QThread):
                 if samples_read <= 0:
                     continue
 
-                self.data_buffer.append((time.time(), data[:, :samples_read]))
+                # Apply +8.5 mV offset to correct -8.5 mV DC offset
+                data += 0.0085
 
-                if self.trigger_enabled:
-                    trigger_data = data[self.trigger_channel, :samples_read]
-                    trigger_idx = self.find_trigger_point(trigger_data)
-                    
-                    if trigger_idx is not None:
-                        pre_trigger = int(self.buffer_size * self.trigger_position)
-                        post_trigger = self.buffer_size - pre_trigger
-                        start_idx = max(0, trigger_idx - pre_trigger)
-                        end_idx = min(samples_read, trigger_idx + post_trigger)
-                        if start_idx < end_idx:
-                            data = data[:, start_idx:end_idx]
-                            samples_read = end_idx - start_idx
-                    else:
-                        continue
+                self.data_buffer.append((time.time(), data[:, :samples_read]))
 
                 time_axis = np.arange(samples_read) / self.sampling_rate
                 frequencies = [0.0] * self.num_channels
                 periods = [0.0] * self.num_channels
+                peak_to_peaks = [0.0] * self.num_channels
+                rms_voltages = [0.0] * self.num_channels
+                max_voltages = [0.0] * self.num_channels
+                min_voltages = [0.0] * self.num_channels
 
                 for ch in self.selected_channels:
                     freq = self.calculate_frequency(data[ch, :samples_read])
@@ -223,9 +185,14 @@ class AcquisitionThread(QThread):
                     else:
                         frequencies[ch] = 0.0
                         periods[ch] = 0.0
+                    peak_to_peaks[ch] = np.max(data[ch, :samples_read]) - np.min(data[ch, :samples_read])
+                    rms_voltages[ch] = np.sqrt(np.mean(data[ch, :samples_read]**2))
+                    max_voltages[ch] = np.max(data[ch, :samples_read])
+                    min_voltages[ch] = np.min(data[ch, :samples_read])
 
                 if data.size > 0 and time_axis.size == data.shape[1]:
-                    self.data_ready.emit(time_axis, data, frequencies, periods)
+                    self.data_ready.emit(time_axis, data, frequencies, periods,
+                                       peak_to_peaks, rms_voltages, max_voltages, min_voltages)
 
         except Exception as e:
             self.error_occurred.emit(f"Thread error: {str(e)}")
@@ -252,9 +219,9 @@ class OscilloscopeGUI(QMainWindow):
         self.setGeometry(100, 100, 1600, 900)
         self.num_channels = 4
         self.channel_colors = ['#FFFF00', '#00FFFF', '#FF0000', '#00FF00']  # Yellow, Cyan, Red, Green
-        self.divisions = 10
+        self.divisions = 10  # 5 divisions above and below
         self.timebase = 0.001
-        self.trigger_position = 0.5
+        self.current_measurements = {}  # Store latest measurements for display
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -295,9 +262,6 @@ class OscilloscopeGUI(QMainWindow):
         # Measurement display section
         self.create_measurement_display()
         
-        # Trigger controls
-        self.create_trigger_controls()
-        
         # Timebase controls
         self.create_timebase_controls()
 
@@ -313,18 +277,6 @@ class OscilloscopeGUI(QMainWindow):
             pen = pg.mkPen(color=self.channel_colors[i], width=4)
             curve = self.plot_widget.plot(pen=pen)
             self.plot_curves.append(curve)
-        
-        # Initialize trigger line (pink with arrow at right end)
-        self.trigger_line = pg.InfiniteLine(angle=0, movable=True, pen=pg.mkPen('#C71585', width=2.75, style=Qt.SolidLine))
-        self.plot_widget.addItem(self.trigger_line)
-        # Add arrow at the right end of the trigger line
-        self.trigger_arrow = pg.ArrowItem(
-            pos=(0, 0),  # Will be updated in update_trigger
-            angle=180,   # Pointing left (toward positive x)
-            pen=pg.mkPen('#C71585', width=2),
-            brush=pg.mkBrush('#C71585')
-        )
-        self.plot_widget.addItem(self.trigger_arrow)
         
         # Set initial ranges
         self.update_plot_ranges()
@@ -402,9 +354,10 @@ class OscilloscopeGUI(QMainWindow):
             
             vdiv_label = QLabel("V/div:")
             vdiv_spin = QDoubleSpinBox()
-            vdiv_spin.setRange(0.01, 10.0)
+            vdiv_spin.setRange(0.001, 10.0)
             vdiv_spin.setValue(1.0)
-            vdiv_spin.setSingleStep(0.1)
+            vdiv_spin.setSingleStep(0.001)
+            vdiv_spin.setDecimals(3)
             vdiv_spin.valueChanged.connect(lambda value, ch=i: self.update_vdiv(ch, value))
             channel_layout.addWidget(vdiv_label, i, 1)
             channel_layout.addWidget(vdiv_spin, i, 2)
@@ -424,64 +377,26 @@ class OscilloscopeGUI(QMainWindow):
 
     def create_measurement_display(self):
         measurement_group = QGroupBox("Measurements")
-        measurement_layout = QGridLayout()
+        measurement_layout = QVBoxLayout()
         
-        self.freq_labels = []
-        self.period_labels = []
+        # Measurement selection combo box
+        self.measurement_select = QComboBox()
+        self.measurement_select.addItems([
+            "Frequency", "Time Period", "Peak-to-Peak Voltage",
+            "RMS Voltage", "Maximum Voltage", "Minimum Voltage"
+        ])
+        self.measurement_select.currentIndexChanged.connect(self.update_measurement_display)
+        measurement_layout.addWidget(self.measurement_select)
+        
+        # Measurement labels for each channel
+        self.measurement_labels = []
         for i in range(self.num_channels):
-            freq_label = QLabel(f"Ch {i+1} Freq: 0.00 Hz")
-            period_label = QLabel(f"Ch {i+1} Period: 0.00 ms")
-            measurement_layout.addWidget(freq_label, i, 0)
-            measurement_layout.addWidget(period_label, i, 1)
-            self.freq_labels.append(freq_label)
-            self.period_labels.append(period_label)
+            label = QLabel(f"Ch {i+1}: 0.00")
+            measurement_layout.addWidget(label)
+            self.measurement_labels.append(label)
         
         measurement_group.setLayout(measurement_layout)
         self.right_layout.addWidget(measurement_group)
-
-    def create_trigger_controls(self):
-        trigger_group = QGroupBox("Trigger")
-        trigger_layout = QGridLayout()
-        
-        self.trigger_enable = QCheckBox("Enable")
-        self.trigger_enable.setChecked(True)
-        self.trigger_enable.stateChanged.connect(self.update_trigger)
-        trigger_layout.addWidget(self.trigger_enable, 0, 0, 1, 2)
-        
-        trigger_source_label = QLabel("Source:")
-        self.trigger_source = QComboBox()
-        self.trigger_source.addItems([f"Channel {i+1}" for i in range(self.num_channels)])
-        self.trigger_source.currentIndexChanged.connect(self.update_trigger)
-        trigger_layout.addWidget(trigger_source_label, 1, 0)
-        trigger_layout.addWidget(self.trigger_source, 1, 1)
-        
-        trigger_edge_label = QLabel("Edge:")
-        self.trigger_edge = QComboBox()
-        self.trigger_edge.addItems(["Rising", "Falling"])
-        self.trigger_edge.currentIndexChanged.connect(self.update_trigger)
-        trigger_layout.addWidget(trigger_edge_label, 2, 0)
-        trigger_layout.addWidget(self.trigger_edge, 2, 1)
-        
-        trigger_level_label = QLabel("Level (V):")
-        self.trigger_level = QDoubleSpinBox()
-        self.trigger_level.setRange(-10.0, 10.0)
-        self.trigger_level.setValue(0.0)
-        self.trigger_level.setSingleStep(0.1)
-        self.trigger_level.valueChanged.connect(self.update_trigger)
-        trigger_layout.addWidget(trigger_level_label, 3, 0)
-        trigger_layout.addWidget(self.trigger_level, 3, 1)
-        
-        trigger_pos_label = QLabel("Position:")
-        self.trigger_pos = QDoubleSpinBox()
-        self.trigger_pos.setRange(0.1, 0.9)
-        self.trigger_pos.setValue(0.5)
-        self.trigger_pos.setSingleStep(0.1)
-        self.trigger_pos.valueChanged.connect(self.update_trigger_position)
-        trigger_layout.addWidget(trigger_pos_label, 4, 0)
-        trigger_layout.addWidget(self.trigger_pos, 4, 1)
-        
-        trigger_group.setLayout(trigger_layout)
-        self.right_layout.addWidget(trigger_group)
 
     def create_timebase_controls(self):
         timebase_group = QGroupBox("Timebase")
@@ -525,25 +440,7 @@ class OscilloscopeGUI(QMainWindow):
 
     def update_vdiv(self, channel, value):
         self.acquisition_thread.update_v_per_div(channel, value)
-        self.update_plot_ranges()
-
-    def update_trigger(self):
-        level = self.trigger_level.value()
-        channel = self.trigger_source.currentIndex()
-        enabled = self.trigger_enable.isChecked()
-        edge = Edge.RISING if self.trigger_edge.currentIndex() == 0 else Edge.FALLING
-        self.acquisition_thread.update_trigger(level, channel, enabled, edge)
-        self.trigger_line.setValue(level)
-        self.trigger_line.setVisible(enabled)
-        # Update arrow position to the right end of the trigger line
-        x_range = self.timebase * self.divisions
-        self.trigger_arrow.setPos(x_range, level)
-        self.trigger_arrow.setVisible(enabled)
-
-    def update_trigger_position(self):
-        position = self.trigger_pos.value()
-        self.acquisition_thread.update_trigger_position(position)
-        self.update_plot_ranges()
+        self.update_plot()
 
     def update_timebase(self):
         time_div_text = self.time_div.currentText()
@@ -565,21 +462,16 @@ class OscilloscopeGUI(QMainWindow):
         self.sample_rate.blockSignals(False)
 
     def update_plot_ranges(self):
-        max_v_per_div = max(self.acquisition_thread.v_per_div[i] for i in range(self.num_channels) if self.channel_visibilities[i])
-        y_range = max_v_per_div * self.divisions
-        self.plot_widget.setYRange(-y_range, y_range)
+        # Fix Y-range to ±5 units (5 divisions above and below)
+        self.plot_widget.setYRange(-5, 5)
         
+        # Set X-range based on timebase
         x_range = self.timebase * self.divisions
-        self.plot_widget.setXRange(-x_range/2, x_range/2)  # Center x-axis
+        self.plot_widget.setXRange(-x_range / 2, x_range / 2)  # Center x-axis
         
         # Center axes at (0,0)
         self.x_axis.setValue(0)
         self.y_axis.setValue(0)
-        
-        # Update trigger line and arrow position
-        trigger_x = self.trigger_position * x_range - x_range/2  # Adjust for centered x-axis
-        self.trigger_line.setValue(trigger_x)
-        self.trigger_arrow.setPos(trigger_x + x_range/2, self.trigger_level.value())  # Arrow at right end
 
     def start_acquisition(self):
         if not self.acquisition_thread.isRunning():
@@ -594,23 +486,55 @@ class OscilloscopeGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.acquisition_thread.wait()
 
-    def update_gui(self, time_axis, data, frequencies, periods):
+    def update_gui(self, time_axis, data, frequencies, periods, peak_to_peaks, rms_voltages, max_voltages, min_voltages):
         if time_axis is None or data is None or len(time_axis) != data.shape[1]:
             return
             
         # Adjust time_axis to be centered around zero
         time_axis = time_axis - (self.timebase * self.divisions) / 2
         
+        # Store measurements for display
+        self.current_measurements = {
+            'Frequency': frequencies,
+            'Time Period': periods,
+            'Peak-to-Peak Voltage': peak_to_peaks,
+            'RMS Voltage': rms_voltages,
+            'Maximum Voltage': max_voltages,
+            'Minimum Voltage': min_voltages
+        }
+        
+        # Update plot
         for ch in range(self.num_channels):
             if self.channel_visibilities[ch] and len(time_axis) == len(data[ch]):
+                # Scale data by dividing by V/div to adjust amplitude in plot
                 scaled_data = data[ch] / self.acquisition_thread.v_per_div[ch]
                 self.plot_curves[ch].setData(time_axis, scaled_data)
-                self.freq_labels[ch].setText(f"Ch {ch+1} Freq: {frequencies[ch]:.2f} Hz")
-                self.period_labels[ch].setText(f"Ch {ch+1} Period: {periods[ch]:.2f} ms")
             else:
                 self.plot_curves[ch].setData([], [])
-                self.freq_labels[ch].setText(f"Ch {ch+1} Freq: 0.00 Hz")
-                self.period_labels[ch].setText(f"Ch {ch+1} Period: 0.00 ms")
+        
+        # Update measurement display
+        self.update_measurement_display()
+
+    def update_measurement_display(self):
+        measurement_type = self.measurement_select.currentText()
+        measurements = self.current_measurements.get(measurement_type, [0.0] * self.num_channels)
+        
+        for ch in range(self.num_channels):
+            if self.channel_visibilities[ch]:
+                if measurement_type == "Frequency":
+                    self.measurement_labels[ch].setText(f"Ch {ch+1} Freq: {measurements[ch]:.2f} Hz")
+                elif measurement_type == "Time Period":
+                    self.measurement_labels[ch].setText(f"Ch {ch+1} Period: {measurements[ch]:.4f} ms")  # 4 decimal places
+                elif measurement_type == "Peak-to-Peak Voltage":
+                    self.measurement_labels[ch].setText(f"Ch {ch+1} Pk-Pk: {measurements[ch]:.3f} V")
+                elif measurement_type == "RMS Voltage":
+                    self.measurement_labels[ch].setText(f"Ch {ch+1} RMS: {measurements[ch]:.3f} V")
+                elif measurement_type == "Maximum Voltage":
+                    self.measurement_labels[ch].setText(f"Ch {ch+1} Max: {measurements[ch]:.3f} V")
+                elif measurement_type == "Minimum Voltage":
+                    self.measurement_labels[ch].setText(f"Ch {ch+1} Min: {measurements[ch]:.3f} V")
+            else:
+                self.measurement_labels[ch].setText(f"Ch {ch+1}: 0.00")
 
     def handle_error(self, error_msg):
         self.stop_acquisition()
